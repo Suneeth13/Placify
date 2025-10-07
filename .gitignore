@@ -1,0 +1,6 @@
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore Google Apps Script local workspace files
+*.json
