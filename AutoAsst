@@ -1,0 +1,229 @@
+/**
+ * -------------------------------------------------------------
+ * 📬 Automated Placement/Test Event Tracker
+ * Author: Suneeth S
+ * Reg. No: 22BAI1158
+ * -------------------------------------------------------------
+ * Description:
+ * Monitors unread Gmail threads for placement/test-related emails.
+ * When your name or registration number appears in attached sheets,
+ * it extracts details, creates calendar events, and sends you
+ * a consolidated summary email.
+ * -------------------------------------------------------------
+ */
+
+const CONFIG = {
+  NAME: "Suneeth S",
+  REG_NO: "22BAI1158",
+  RECIPIENT: "ssanapoori@gmail.com",
+  KEYWORDS: ["talk", "test", "process", "online", "assessment", "exam"]
+};
+
+/**
+ * Trigger function — executes every minute (set via time trigger)
+ */
+function runPersonalAssistant() {
+  try {
+    Logger.log("Running placement/test email scan...");
+    processEmails();
+  } catch (err) {
+    Logger.log(`Error in runPersonalAssistant: ${err}`);
+  }
+}
+
+/**
+ * Main logic — scans unread emails and processes relevant ones
+ */
+function processEmails() {
+  const threads = GmailApp.search("is:unread");
+  if (!threads.length) {
+    Logger.log("✅ No unread emails found.");
+    return;
+  }
+
+  const createdEvents = new Set();
+  const summaryResults = [];
+
+  threads.forEach(thread => {
+    thread.getMessages().forEach(msg => {
+      const subject = msg.getSubject().toLowerCase();
+
+      // Skip unrelated mails
+      if (!CONFIG.KEYWORDS.some(k => subject.includes(k))) return;
+
+      const matchedRows = extractMatchingRows(msg);
+      if (!matchedRows.length) return;
+
+      // Extract date/time or assign default
+      const bodyText = msg.getPlainBody();
+      const eventStart = extractDateTimeFromText(subject + " " + bodyText) || new Date();
+      eventStart.setHours(eventStart.getHours() || 10, 0, 0, 0);
+      const eventEnd = new Date(eventStart.getTime() + 60 * 60 * 1000);
+
+      // Prevent duplicate calendar entries
+      const eventKey = `${subject}-${eventStart.getTime()}`;
+      if (!createdEvents.has(eventKey)) {
+        CalendarApp.createEvent(subject, eventStart, eventEnd, {
+          location: matchedRows[0].venue
+        });
+        createdEvents.add(eventKey);
+        Logger.log(`📅 Event created for: ${subject}`);
+      }
+
+      summaryResults.push({
+        subject: msg.getSubject(),
+        start: eventStart,
+        link: msg.getThread().getPermalink(),
+        rows: matchedRows
+      });
+
+      msg.markRead();
+    });
+  });
+
+  if (summaryResults.length > 0) {
+    sendSummaryEmail(summaryResults);
+  } else {
+    Logger.log("⚙️ No relevant events found; skipping email summary.");
+  }
+}
+
+/**
+ * Extract rows from spreadsheet attachments where your name/reg no appears
+ */
+function extractMatchingRows(msg) {
+  const results = [];
+
+  msg.getAttachments().forEach(att => {
+    const isSheet = att.getContentType().includes("sheet") || att.getName().match(/\.(xlsx|xls)$/);
+    if (!isSheet) return;
+
+    try {
+      const blob = att.copyBlob();
+      const fileMeta = {
+        name: att.getName().replace(/\.(xlsx|xls)$/, ""),
+        mimeType: "application/vnd.google-apps.spreadsheet"
+      };
+      const file = Drive.Files.create(fileMeta, blob);
+      const spreadsheet = SpreadsheetApp.openById(file.id);
+
+      spreadsheet.getSheets().forEach(sheet => {
+        const data = sheet.getDataRange().getValues();
+        const headers = data[0].map(h => h.toString().toLowerCase());
+        const venueIndex = headers.findIndex(h => h.includes("venue"));
+
+        for (let i = 1; i < data.length; i++) {
+          const rowString = data[i].join(" ").toLowerCase();
+          if (
+            rowString.includes(CONFIG.NAME.toLowerCase()) ||
+            rowString.includes(CONFIG.REG_NO.toLowerCase())
+          ) {
+            results.push({
+              row: data[i],
+              venue: venueIndex !== -1 ? data[i][venueIndex] : "TBD"
+            });
+          }
+        }
+      });
+
+      DriveApp.getFileById(file.id).setTrashed(true);
+    } catch (err) {
+      Logger.log(`⚠️ Error processing attachment: ${att.getName()} — ${err}`);
+    }
+  });
+
+  return results;
+}
+
+/**
+ * Sends a professional summary email of detected events
+ */
+function sendSummaryEmail(results) {
+  let body = `
+    <p>Hello <b>${CONFIG.NAME}</b>,</p>
+    <p>Here are your latest <b>placement/test events</b> detected from emails:</p>
+  `;
+
+  results.forEach((res, idx) => {
+    body += `
+      <hr>
+      <b>Event ${idx + 1}:</b><br>
+      📌 <b>Subject:</b> ${res.subject}<br>
+      🗓️ <b>Date & Time:</b> ${res.start}<br>
+      📧 <b>Email Thread:</b> <a href="${res.link}" target="_blank">View Email</a><br><br>
+    `;
+
+    res.rows.forEach(match => {
+      const rowHtml = match.row
+        .map(cell => {
+          let text = cell.toString();
+          const lower = text.toLowerCase();
+          if (lower.includes(CONFIG.NAME.toLowerCase()) || lower.includes(CONFIG.REG_NO.toLowerCase())) {
+            text = `<b>${text}</b>`;
+          }
+          return `<td>${text}</td>`;
+        })
+        .join("");
+      body += `<table border="1" cellpadding="4" cellspacing="0"><tr>${rowHtml}</tr></table><br>`;
+    });
+  });
+
+  body += `
+    <p>🔔 <i>Reminder:</i> Check your Google Calendar for updated event details.</p>
+    <p>Best,<br><b>Your Personal Assistant</b></p>
+  `;
+
+  GmailApp.sendEmail(CONFIG.RECIPIENT, "📢 Placement/Test Updates Summary", "", { htmlBody: body });
+  Logger.log("✅ Summary email sent successfully.");
+}
+
+/**
+ * Extract date and time from email text
+ */
+function extractDateTimeFromText(text) {
+  const date = extractDate(text);
+  const time = extractTime(text);
+  if (date && time) return new Date(`${date} ${time}`);
+  if (date) return new Date(`${date} 10:00 AM`);
+  return null;
+}
+
+/**
+ * Extracts date from free-form text
+ */
+function extractDate(text) {
+  const monthMap = {
+    jan: "January", feb: "February", mar: "March", apr: "April",
+    may: "May", jun: "June", jul: "July", aug: "August",
+    sep: "September", oct: "October", nov: "November", dec: "December"
+  };
+
+  const patterns = [
+    /on\s+(\d{1,2})\.(\d{1,2})\.(\d{4})/i,
+    /on\s+(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)\s+(\d{4})/i,
+    /on\s+(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+
+    let day = match[1], month = match[2], year = match[3];
+    if (isNaN(month)) {
+      const m = monthMap[month.toLowerCase().substring(0, 3)];
+      if (!m) continue;
+      month = m;
+    }
+    return `${month} ${day}, ${year}`;
+  }
+
+  return null;
+}
+
+/**
+ * Extracts time (hh:mm am/pm) from text
+ */
+function extractTime(text) {
+  const match = text.match(/(\d{1,2})[:.](\d{2})\s*([ap]m)/i);
+  return match ? `${match[1]}:${match[2]} ${match[3].toUpperCase()}` : null;
+}
